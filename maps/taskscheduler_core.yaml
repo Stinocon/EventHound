@@ -1,0 +1,9 @@
+"Security:4698":
+  rename:
+    TaskName: task
+    TaskContent: xml
+  tags: [taskscheduler, create]
+"Security:4702":
+  rename:
+    TaskName: task
+  tags: [taskscheduler, update]

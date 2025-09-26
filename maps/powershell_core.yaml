@@ -1,0 +1,10 @@
+"Microsoft-Windows-PowerShell/Operational:4103":
+  rename:
+    CommandPath: script
+    CommandName: command
+  tags: [powershell, module]
+"Microsoft-Windows-PowerShell/Operational:4104":
+  rename:
+    ScriptBlockText: script
+    EngineVersion: ps_version
+  tags: [powershell, scriptblock]

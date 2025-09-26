@@ -1,0 +1,12 @@
+python-evtx==0.7.4
+xmltodict==0.13.0
+orjson==3.10.7
+click==8.1.7
+rich==13.9.2
+pytz==2024.1
+fastapi==0.112.2
+uvicorn==0.30.3
+pyinstaller==6.10.0
+requests==2.32.3
+PyYAML==6.0.2
+pyarrow==17.0.0

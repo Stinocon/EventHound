@@ -1,0 +1,22 @@
+"Microsoft-Windows-Sysmon/Operational:1":
+  rename:
+    Image: process
+    CommandLine: cmd
+    ParentImage: parent
+  tags: [sysmon, process, create]
+"Microsoft-Windows-Sysmon/Operational:3":
+  rename:
+    SourceIp: src_ip
+    DestinationIp: dst_ip
+    DestinationPort: dst_port
+  tags: [sysmon, network]
+"Microsoft-Windows-Sysmon/Operational:10":
+  rename:
+    TargetObject: reg_path
+    Details: reg_details
+  tags: [sysmon, registry]
+"Microsoft-Windows-Sysmon/Operational:11":
+  rename:
+    TargetFilename: file
+    ProcessGuid: process_guid
+  tags: [sysmon, file]

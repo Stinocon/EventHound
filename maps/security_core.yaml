@@ -1,0 +1,26 @@
+"Security:4624":
+  rename:
+    TargetUserName: user
+    IpAddress: src_ip
+  tags: [logon, success]
+"Security:4625":
+  rename:
+    TargetUserName: user
+    IpAddress: src_ip
+  tags: [logon, failed]
+"Security:4688":
+  rename:
+    NewProcessName: process
+    ParentProcessName: parent
+    CommandLine: cmd
+  tags: [process, start]
+"Security:4697":
+  rename:
+    ServiceName: service
+    ServiceFileName: image
+  tags: [service, install]
+"Security:7045":
+  rename:
+    ServiceName: service
+    ImagePath: image
+  tags: [service, persistence]

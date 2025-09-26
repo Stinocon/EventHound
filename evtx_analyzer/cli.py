@@ -9,8 +9,10 @@ from .filters import EventFilter
 from .exporters import JsonlExporter, CsvExporter
 from .profiles import get_profile
 from .utils import iter_evtx_paths, parse_iso8601_utc, iter_vss_evtx_paths
-from .storage import init_db as storage_init_db, insert_events
+from .storage import init_db as storage_init_db, insert_events, insert_findings
 from .maps import EventMapper
+from .rules import RuleSet
+from .safelists import Safelist
 
 console = Console()
 
@@ -45,6 +47,9 @@ Env vars:
 @click.option('--dsl', default='', type=str, help='Minimal DSL filter, e.g., "channel==Security AND TargetUserName~=^admin"')
 @click.option('--maps-dir', default='', type=str, help='Load YAML maps from this directory')
 @click.option('--maps-sync', default='', type=str, help='Remote URL to sync/download maps (JSON or YAML)')
+@click.option('--rules-dir', default='', type=str, help='Load detection rules (YAML) from this directory')
+@click.option('--safelists-dir', default='', type=str, help='Load safelists (YAML/TXT) from this directory')
+@click.option('--findings-output', default='', type=str, help='Output prefix for findings (writes .findings.jsonl/.csv)')
 @click.option('--vss', is_flag=True, help='Also scan Volume Shadow Copies (Windows only)')
 @click.option('--vss-drives', default='C:', type=str, help='Comma-separated drive roots to scan with --vss (e.g., C:,D:)')
 @click.option('--serve', is_flag=True, help='Start local web server to visualize results')
@@ -53,7 +58,8 @@ Env vars:
 @click.option('--help-all', is_flag=True, help='Show extended help with profiles, examples, env vars')
 def main(input_path: str, output_prefix: str, formats: str, profile: str, event_ids: str, only_event_id: str,
          channels: str, since: str, until: str, workers: int, dedup: bool, dsl: str, maps_dir: str, maps_sync: str,
-         vss: bool, vss_drives: str, serve: bool, host: str, port: int, help_all: bool) -> None:
+         rules_dir: str, safelists_dir: str, findings_output: str, vss: bool, vss_drives: str,
+         serve: bool, host: str, port: int, help_all: bool) -> None:
     if help_all:
         console.print(EXTENDED_HELP)
         sys.exit(0)
@@ -69,6 +75,14 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
     if 'parquet' in selected_formats:
         from .exporters import ParquetExporter
         exporters.append(ParquetExporter(output_prefix + '.parquet'))
+
+    # Findings exporters (optional)
+    findings_jsonl = None
+    findings_csv = None
+    if findings_output:
+        from .exporters import FindingsJsonlExporter, FindingsCsvExporter
+        findings_jsonl = FindingsJsonlExporter(findings_output + '.findings.jsonl')
+        findings_csv = FindingsCsvExporter(findings_output + '.findings.csv')
 
     effective_profile = profile or os.environ.get('WIN_EVTX_PROFILE') or 'ir-default'
     profile_filter = get_profile(effective_profile)
@@ -96,6 +110,14 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
     if maps_sync:
         mapper.sync_remote(maps_sync)
 
+    # Load rules and safelists
+    rule_set = RuleSet()
+    if rules_dir:
+        rule_set.load_dir(rules_dir)
+    safelist = Safelist()
+    if safelists_dir:
+        safelist.load_dir(safelists_dir)
+
     evtx_paths = list(iter_evtx_paths(input_path))
     if vss:
         drives = [d.strip() for d in vss_drives.split(',') if d.strip()]
@@ -106,7 +128,9 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
         sys.exit(1)
 
     total_matched = 0
+    total_findings = 0
     buffered_for_db = []
+    buffered_findings: list = []
 
     if serve:
         storage_init_db()
@@ -116,11 +140,37 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
         for path in evtx_paths:
             for evt in parse_evtx_file(path, event_filter, mapper=mapper, dedup=dedup):
                 total_matched += 1
+                # Evaluate rules if any
+                if rule_set.rules and not safelist.is_event_safelisted(evt):
+                    hits = rule_set.evaluate(evt)
+                    for h in hits:
+                        if safelist.is_finding_safelisted(h):
+                            continue
+                        finding_row = {
+                            'event_timestamp': evt.get('timestamp'),
+                            'channel': evt.get('channel'),
+                            'event_id': evt.get('event_id'),
+                            'rule_id': h.get('rule_id'),
+                            'severity': h.get('severity'),
+                            'description': h.get('description'),
+                            'tags': h.get('tags') or [],
+                            'event_ref': None,
+                        }
+                        total_findings += 1
+                        buffered_findings.append(finding_row)
+                        if findings_jsonl:
+                            findings_jsonl.write(finding_row)
+                        if findings_csv:
+                            findings_csv.write(finding_row)
+
                 if serve:
                     buffered_for_db.append(evt)
                     if len(buffered_for_db) >= 1000:
                         insert_events(buffered_for_db)
                         buffered_for_db.clear()
+                    if len(buffered_findings) >= 500:
+                        insert_findings(buffered_findings)
+                        buffered_findings.clear()
                 for ex in exporters:
                     ex.write(evt)
             progress.advance(task)
@@ -128,11 +178,18 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
     if buffered_for_db:
         insert_events(buffered_for_db)
         buffered_for_db.clear()
+    if buffered_findings:
+        insert_findings(buffered_findings)
+        buffered_findings.clear()
 
     for ex in exporters:
         ex.close()
+    if findings_jsonl:
+        findings_jsonl.close()
+    if findings_csv:
+        findings_csv.close()
 
-    console.print(f'[green]Done.[/green] Extracted events: {total_matched}. Profile: {effective_profile}')
+    console.print(f'[green]Done.[/green] Extracted events: {total_matched}. Findings: {total_findings}. Profile: {effective_profile}')
 
     if serve:
         try:

@@ -1,0 +1,28 @@
+- id: long_cmdline
+  description: Command line length suspiciously long
+  severity: low
+  tags: [cmdline, anomaly]
+  any:
+    - { field: CommandLine, op: length_gt, value: 200 }
+
+- id: base64_in_cmd
+  description: Base64-encoded content found in command line
+  severity: medium
+  tags: [encoding, possible-obfuscation]
+  any:
+    - { field: CommandLine, op: regex, value: "(?i)\b[A-Za-z0-9+/]{200,}={0,2}\b" }
+
+- id: powershell_suspicious
+  description: Suspicious PowerShell usage (download or IEX)
+  severity: high
+  tags: [powershell, suspicious]
+  any:
+    - { field: ScriptBlockText, op: regex, value: "(?i)(DownloadString|Invoke-Expression|IEX|FromBase64String)" }
+    - { field: CommandLine, op: regex, value: "(?i)powershell.+(DownloadString|Invoke-Expression|IEX|FromBase64String)" }
+
+- id: failed_logon
+  description: Failed logon event (4625)
+  severity: info
+  tags: [auth, failed]
+  all:
+    - { field: event_id, op: eq, value: 4625 }

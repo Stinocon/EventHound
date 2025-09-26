@@ -1,7 +1,7 @@
 import os
 import json
 import sqlite3
-from typing import Dict, Iterable
+from typing import Dict, Iterable, List
 
 DB_PATH = os.path.join(os.getcwd(), 'outputs', 'events.db')
 
@@ -30,6 +30,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS findings (
+                id INTEGER PRIMARY KEY,
+                event_timestamp TEXT,
+                channel TEXT,
+                event_id TEXT,
+                rule_id TEXT,
+                severity TEXT,
+                description TEXT,
+                tags TEXT,
+                event_ref INTEGER,
+                FOREIGN KEY(event_ref) REFERENCES events(id)
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -52,6 +68,35 @@ def insert_events(events: Iterable[Dict]) -> int:
         cur.executemany(
             """
             INSERT INTO events (timestamp, channel, event_id, computer, provider, record_id, user_sid, data_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def insert_findings(findings: List[Dict]) -> int:
+    if not findings:
+        return 0
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        rows = [(
+            f.get('event_timestamp'),
+            f.get('channel'),
+            f.get('event_id'),
+            f.get('rule_id'),
+            f.get('severity'),
+            f.get('description'),
+            ','.join(f.get('tags') or []),
+            f.get('event_ref'),
+        ) for f in findings]
+        cur.executemany(
+            """
+            INSERT INTO findings (event_timestamp, channel, event_id, rule_id, severity, description, tags, event_ref)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows

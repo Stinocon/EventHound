@@ -43,6 +43,21 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS findings (
+                id INTEGER PRIMARY KEY,
+                event_timestamp TEXT,
+                channel TEXT,
+                event_id TEXT,
+                rule_id TEXT,
+                severity TEXT,
+                description TEXT,
+                tags TEXT,
+                event_ref INTEGER
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -53,10 +68,6 @@ def list_events(
     q: Optional[str] = Query(default=None),
     channel: Optional[str] = Query(default=None),
     event_id: Optional[str] = Query(default=None),
-    user_sid: Optional[str] = Query(default=None),
-    provider: Optional[str] = Query(default=None),
-    since: Optional[str] = Query(default=None),
-    until: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     sort_by: str = Query(default='timestamp'),
@@ -76,18 +87,6 @@ def list_events(
         if event_id:
             clauses.append('event_id = ?')
             params.append(event_id)
-        if user_sid:
-            clauses.append('user_sid = ?')
-            params.append(user_sid)
-        if provider:
-            clauses.append('provider = ?')
-            params.append(provider)
-        if since:
-            clauses.append('timestamp >= ?')
-            params.append(since)
-        if until:
-            clauses.append('timestamp <= ?')
-            params.append(until)
         where = 'WHERE ' + ' AND '.join(clauses) if clauses else ''
         allowed_cols = {'timestamp','channel','event_id','computer','provider','user_sid'}
         if sort_by not in allowed_cols:
@@ -146,6 +145,52 @@ def download_event(event_pk: int):
         conn.close()
 
 
+@app.get('/api/findings')
+def list_findings(
+    q: Optional[str] = Query(default=None),
+    rule_id: Optional[str] = Query(default=None),
+    severity: Optional[str] = Query(default=None),
+    channel: Optional[str] = Query(default=None),
+    event_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    sort_by: str = Query(default='event_timestamp'),
+    sort_dir: str = Query(default='desc'),
+):
+    conn = _get_db()
+    try:
+        clauses = []
+        params: List[Any] = []
+        if q:
+            like = f'%{q}%'
+            clauses.append('(description LIKE ? OR tags LIKE ? OR rule_id LIKE ?)')
+            params += [like, like, like]
+        if rule_id:
+            clauses.append('rule_id = ?')
+            params.append(rule_id)
+        if severity:
+            clauses.append('severity = ?')
+            params.append(severity)
+        if channel:
+            clauses.append('channel = ?')
+            params.append(channel)
+        if event_id:
+            clauses.append('event_id = ?')
+            params.append(event_id)
+        where = 'WHERE ' + ' AND '.join(clauses) if clauses else ''
+        allowed_cols = {'event_timestamp','channel','event_id','rule_id','severity'}
+        if sort_by not in allowed_cols:
+            sort_by = 'event_timestamp'
+        sort_dir = 'ASC' if str(sort_dir).lower() == 'asc' else 'DESC'
+        sql = f"SELECT * FROM findings {where} ORDER BY {sort_by} {sort_dir} LIMIT ? OFFSET ?"
+        params_w_limit = params + [limit, offset]
+        rows = [dict(r) for r in conn.execute(sql, params_w_limit)]
+        total = conn.execute(f"SELECT COUNT(*) as c FROM findings {where}", params).fetchone()['c'] if where else conn.execute("SELECT COUNT(*) as c FROM findings").fetchone()['c']
+        return {"items": rows, "total": total}
+    finally:
+        conn.close()
+
+
 @app.get('/api/stats/top_event_ids')
 def stats_top_event_ids(limit: int = Query(default=10, ge=1, le=100)):
     conn = _get_db()
@@ -197,7 +242,7 @@ def index():
 <html>
 <head>
   <meta charset='utf-8'>
-  <title>Win EVTX Analyzer</title>
+  <title>EventHound</title>
   <style>
     :root { --bg:#ffffff; --fg:#111; --muted:#666; --card:#fff; --border:#ddd; --pill:#eef; --accent:#2b7; }
     .dark { --bg:#0f1217; --fg:#e8edf2; --muted:#9aa7b2; --card:#111722; --border:#223; --pill:#1e2636; --accent:#4ad; }
@@ -215,128 +260,165 @@ def index():
     .charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
     .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     label { color: var(--muted); font-size: 12px; }
+    .tabs { display:flex; gap: 8px; margin-bottom: 12px; }
+    .tab { padding:6px 10px; border:1px solid var(--border); border-radius:6px; cursor:pointer; }
+    .tab.active { background: var(--pill); }
+    .hidden { display:none; }
   </style>
   <script src='https://cdn.jsdelivr.net/npm/chart.js'></script>
 </head>
 <body>
   <div class='row' style='justify-content: space-between;'>
-    <h2>Win EVTX Analyzer</h2>
+    <h2>EventHound</h2>
     <div>
       <button onclick='toggleTheme()' id='themeBtn'>Dark mode</button>
-      <button onclick='saveQuery()'>Save query</button>
-      <button onclick='loadQuery()'>Load query</button>
-      <select id='savedSelect'></select>
-      <button onclick='deleteQuery()'>Delete</button>
     </div>
   </div>
-  <div class='toolbar'>
-    <input id='q' placeholder='Search text...' />
-    <input id='channel' placeholder='Channel (es. Security)' />
-    <input id='event' placeholder='Event ID (es. 4624)' />
-    <input id='user_sid' placeholder='User SID' />
-    <input id='provider' placeholder='Provider' />
-    <label>Since</label><input id='since' placeholder='YYYY-MM-DDTHH:MM:SSZ' />
-    <label>Until</label><input id='until' placeholder='YYYY-MM-DDTHH:MM:SSZ' />
-    <button onclick='load(0)'>Search</button>
-    <span id='total' class='pill'></span>
+
+  <div class='tabs'>
+    <div class='tab active' id='tabEvents' onclick='showTab("events")'>Events</div>
+    <div class='tab' id='tabFindings' onclick='showTab("findings")'>Findings</div>
   </div>
-  <div class='grid'>
+
+  <div id='viewEvents'>
+    <div class='toolbar'>
+      <input id='q' placeholder='Search text...' />
+      <input id='channel' placeholder='Channel (e.g., Security)' />
+      <input id='event' placeholder='Event ID (e.g., 4624)' />
+      <button onclick='load(0)'>Search</button>
+      <span id='total' class='pill'></span>
+    </div>
+    <div class='grid'>
+      <div class='card'>
+        <table>
+          <thead>
+            <tr>
+              <th class='sortable' onclick="setSort('timestamp')">Timestamp</th>
+              <th class='sortable' onclick="setSort('channel')">Channel</th>
+              <th class='sortable' onclick="setSort('event_id')">Event ID</th>
+              <th class='sortable' onclick="setSort('computer')">Computer</th>
+              <th class='sortable' onclick="setSort('provider')">Provider</th>
+              <th class='sortable' onclick="setSort('user_sid')">User SID</th>
+            </tr>
+          </thead>
+          <tbody id='rows'></tbody>
+        </table>
+        <div style='margin-top:8px; display:flex; justify-content: space-between; align-items:center;'>
+          <div>
+            <button onclick='prevPage()'>Prev</button>
+            <button onclick='nextPage()'>Next</button>
+          </div>
+          <div class='pill' id='pageinfo'></div>
+        </div>
+        <div class='charts'>
+          <div class='card'>
+            <h3>Trend</h3>
+            <canvas id='chartTrend' height='120'></canvas>
+          </div>
+          <div class='card'>
+            <h3>Top Event IDs</h3>
+            <canvas id='chartTopIds' height='120'></canvas>
+          </div>
+          <div class='card'>
+            <h3>Top Channels</h3>
+            <canvas id='chartTopChannels' height='120'></canvas>
+          </div>
+        </div>
+      </div>
+      <div class='card'>
+        <h3>Event detail</h3>
+        <div id='detail'>Select a row to view details.</div>
+        <div style='margin-top:8px;'>
+          <button id='downloadBtn' style='display:none;' onclick='downloadCurrent()'>Download JSON</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id='viewFindings' class='hidden'>
+    <div class='toolbar'>
+      <input id='fq' placeholder='Search text (rule/tags/desc)...' />
+      <input id='frule' placeholder='Rule ID' />
+      <input id='fsev' placeholder='Severity (info/low/med/high)' />
+      <input id='fchan' placeholder='Channel' />
+      <input id='feid' placeholder='Event ID' />
+      <button onclick='loadFindings(0)'>Search</button>
+      <span id='ftotal' class='pill'></span>
+    </div>
     <div class='card'>
       <table>
         <thead>
           <tr>
-            <th class='sortable' onclick="setSort('timestamp')">Timestamp</th>
-            <th class='sortable' onclick="setSort('channel')">Channel</th>
-            <th class='sortable' onclick="setSort('event_id')">Event ID</th>
-            <th class='sortable' onclick="setSort('computer')">Computer</th>
-            <th class='sortable' onclick="setSort('provider')">Provider</th>
-            <th class='sortable' onclick="setSort('user_sid')">User SID</th>
+            <th>Time</th>
+            <th>Channel</th>
+            <th>Event</th>
+            <th>Rule</th>
+            <th>Severity</th>
+            <th>Description</th>
+            <th>Tags</th>
           </tr>
         </thead>
-        <tbody id='rows'></tbody>
+        <tbody id='frows'></tbody>
       </table>
       <div style='margin-top:8px; display:flex; justify-content: space-between; align-items:center;'>
         <div>
-          <button onclick='prevPage()'>Prev</button>
-          <button onclick='nextPage()'>Next</button>
+          <button onclick='prevFindings()'>Prev</button>
+          <button onclick='nextFindings()'>Next</button>
         </div>
-        <div class='pill' id='pageinfo'></div>
-      </div>
-      <div class='charts'>
-        <div class='card'>
-          <h3>Trend</h3>
-          <canvas id='chartTrend' height='120'></canvas>
-        </div>
-        <div class='card'>
-          <h3>Top Event IDs</h3>
-          <canvas id='chartTopIds' height='120'></canvas>
-        </div>
-        <div class='card'>
-          <h3>Top Channels</h3>
-          <canvas id='chartTopChannels' height='120'></canvas>
-        </div>
-      </div>
-    </div>
-    <div class='card'>
-      <h3>Event detail</h3>
-      <div id='detail'>Seleziona una riga per vedere i dettagli.</div>
-      <div style='margin-top:8px;'>
-        <button id='downloadBtn' style='display:none;' onclick='downloadCurrent()'>Download JSON</button>
+        <div class='pill' id='fpageinfo'></div>
       </div>
     </div>
   </div>
+
   <script>
+    // THEME
+    function toggleTheme() {
+      document.body.classList.toggle('dark');
+      const mode = document.body.classList.contains('dark') ? 'dark' : 'light';
+      localStorage.setItem('theme', mode);
+      document.getElementById('themeBtn').innerText = mode === 'dark' ? 'Light mode' : 'Dark mode';
+    }
+    (function(){ const mode = localStorage.getItem('theme') || 'light'; if (mode==='dark') document.body.classList.add('dark'); document.getElementById('themeBtn').innerText = mode==='dark' ? 'Light mode' : 'Dark mode'; })();
+
+    // TABS
+    function showTab(name) {
+      const isEvents = name === 'events';
+      document.getElementById('viewEvents').classList.toggle('hidden', !isEvents);
+      document.getElementById('viewFindings').classList.toggle('hidden', isEvents);
+      document.getElementById('tabEvents').classList.toggle('active', isEvents);
+      document.getElementById('tabFindings').classList.toggle('active', !isEvents);
+      if (!isEvents) { loadFindings(0); }
+    }
+
+    // EVENTS VIEW (existing)
     let limit = 50;
     let offset = 0;
-    let lastQuery = {};
     let sortBy = 'timestamp';
     let sortDir = 'desc';
     let currentId = null;
     let chartTrend, chartTopIds, chartTopChannels;
 
+    function qs(obj) { return Object.entries(obj).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&'); }
+
     function paramsObj() {
       const q = document.getElementById('q').value;
       const channel = document.getElementById('channel').value;
       const event_id = document.getElementById('event').value;
-      const user_sid = document.getElementById('user_sid').value;
-      const provider = document.getElementById('provider').value;
-      const since = document.getElementById('since').value;
-      const until = document.getElementById('until').value;
       const obj = { limit, offset, sort_by: sortBy, sort_dir: sortDir };
       if (q) obj.q = q;
       if (channel) obj.channel = channel;
       if (event_id) obj.event_id = event_id;
-      if (user_sid) obj.user_sid = user_sid;
-      if (provider) obj.provider = provider;
-      if (since) obj.since = since;
-      if (until) obj.until = until;
       return obj;
-    }
-
-    function qs(obj) {
-      return Object.entries(obj).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-    }
-
-    function setSort(col) {
-      if (sortBy === col) {
-        sortDir = (sortDir === 'asc') ? 'desc' : 'asc';
-      } else {
-        sortBy = col;
-        sortDir = 'asc';
-      }
-      load(0);
     }
 
     async function load(newOffset) {
       if (newOffset !== undefined) offset = newOffset;
       const p = paramsObj();
-      lastQuery = p;
       const res = await fetch('/api/events?' + qs(p));
       const data = await res.json();
       document.getElementById('total').innerText = 'Total: ' + data.total;
       document.getElementById('pageinfo').innerText = `offset ${offset} • showing ${data.items.length} • sort ${sortBy} ${sortDir}`;
-      const rows = document.getElementById('rows');
-      rows.innerHTML = '';
+      const rows = document.getElementById('rows'); rows.innerHTML='';
       for (const it of data.items) {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td>${it.timestamp||''}</td><td>${it.channel||''}</td><td>${it.event_id||''}</td><td>${it.computer||''}</td><td>${it.provider||''}</td><td>${it.user_sid||''}</td>`;
@@ -346,9 +428,12 @@ def index():
       loadCharts();
     }
 
+    function setSort(col) { if (sortBy===col) { sortDir = (sortDir==='asc')?'desc':'asc'; } else { sortBy=col; sortDir='asc'; } load(0); }
+    function nextPage() { offset += limit; load(offset); }
+    function prevPage() { offset = Math.max(0, offset - limit); load(offset); }
+
     async function showDetail(id) {
-      const res = await fetch('/api/events/' + id);
-      const data = await res.json();
+      const res = await fetch('/api/events/' + id); const data = await res.json();
       const detail = document.getElementById('detail');
       detail.innerHTML = `<div><b>ID</b>: ${data.id}</div>
         <div><b>Timestamp</b>: ${data.timestamp||''}</div>
@@ -359,128 +444,55 @@ def index():
         <div><b>User SID</b>: ${data.user_sid||''}</div>
         <div style='margin-top:8px;'><b>EventData</b>:</div>
         <pre>${JSON.stringify(data.data, null, 2)}</pre>`;
-      currentId = id;
-      document.getElementById('downloadBtn').style.display = 'inline-block';
+      currentId = id; document.getElementById('downloadBtn').style.display='inline-block';
     }
 
     async function downloadCurrent() {
       if (!currentId) return;
       const res = await fetch('/api/events/' + currentId + '/download');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `event_${currentId}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    }
-
-    function nextPage() {
-      offset += limit;
-      load(offset);
-    }
-    function prevPage() {
-      offset = Math.max(0, offset - limit);
-      load(offset);
+      const blob = await res.blob(); const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download=`event_${currentId}.json`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
     }
 
     async function loadCharts() {
-      const tRes = await fetch('/api/stats/trend?bucket=hour');
-      const tData = await tRes.json();
-      const tLabels = tData.items.map(x => x.ts);
-      const tValues = tData.items.map(x => x.value);
-      if (chartTrend) chartTrend.destroy();
-      chartTrend = new Chart(document.getElementById('chartTrend').getContext('2d'), {
-        type: 'line',
-        data: { labels: tLabels, datasets: [{ label: 'Events/hour', data: tValues, borderColor: '#2b7', fill: false }] },
-        options: { responsive: true, scales: { y: { beginAtZero: true } } }
-      });
-
-      const idRes = await fetch('/api/stats/top_event_ids');
-      const idData = await idRes.json();
-      const idLabels = idData.items.map(x => x.label || '(null)');
-      const idValues = idData.items.map(x => x.value);
-      if (chartTopIds) chartTopIds.destroy();
-      chartTopIds = new Chart(document.getElementById('chartTopIds').getContext('2d'), {
-        type: 'bar',
-        data: { labels: idLabels, datasets: [{ label: 'Count', data: idValues, backgroundColor: '#58f' }] },
-        options: { responsive: true, indexAxis: 'y', scales: { x: { beginAtZero: true } } }
-      });
-
-      const chRes = await fetch('/api/stats/top_channels');
-      const chData = await chRes.json();
-      const chLabels = chData.items.map(x => x.label || '(null)');
-      const chValues = chData.items.map(x => x.value);
-      if (chartTopChannels) chartTopChannels.destroy();
-      chartTopChannels = new Chart(document.getElementById('chartTopChannels').getContext('2d'), {
-        type: 'bar',
-        data: { labels: chLabels, datasets: [{ label: 'Count', data: chValues, backgroundColor: '#fa5' }] },
-        options: { responsive: true, indexAxis: 'y', scales: { x: { beginAtZero: true } } }
-      });
+      const tRes = await fetch('/api/stats/trend?bucket=hour'); const tData = await tRes.json();
+      const idRes = await fetch('/api/stats/top_event_ids'); const idData = await idRes.json();
+      const chRes = await fetch('/api/stats/top_channels'); const chData = await chRes.json();
+      const tLabels = tData.items.map(x=>x.ts); const tValues = tData.items.map(x=>x.value);
+      const idLabels = idData.items.map(x=>x.label||'(null)'); const idValues = idData.items.map(x=>x.value);
+      const chLabels = chData.items.map(x=>x.label||'(null)'); const chValues = chData.items.map(x=>x.value);
+      if (chartTrend) chartTrend.destroy(); if (chartTopIds) chartTopIds.destroy(); if (chartTopChannels) chartTopChannels.destroy();
+      chartTrend = new Chart(document.getElementById('chartTrend').getContext('2d'), { type:'line', data:{ labels:tLabels, datasets:[{ label:'Events/hour', data:tValues, borderColor:'#2b7', fill:false }] }, options:{ responsive:true, scales:{ y:{ beginAtZero:true } } } });
+      chartTopIds = new Chart(document.getElementById('chartTopIds').getContext('2d'), { type:'bar', data:{ labels:idLabels, datasets:[{ label:'Count', data:idValues, backgroundColor:'#58f' }] }, options:{ responsive:true, indexAxis:'y', scales:{ x:{ beginAtZero:true } } } });
+      chartTopChannels = new Chart(document.getElementById('chartTopChannels').getContext('2d'), { type:'bar', data:{ labels:chLabels, datasets:[{ label:'Count', data:chValues, backgroundColor:'#fa5' }] }, options:{ responsive:true, indexAxis:'y', scales:{ x:{ beginAtZero:true } } } });
     }
 
-    function toggleTheme() {
-      document.body.classList.toggle('dark');
-      const mode = document.body.classList.contains('dark') ? 'dark' : 'light';
-      localStorage.setItem('theme', mode);
-      document.getElementById('themeBtn').innerText = mode === 'dark' ? 'Light mode' : 'Dark mode';
+    // FINDINGS VIEW
+    let flimit = 50; let foffset = 0;
+    async function loadFindings(newOffset) {
+      if (newOffset !== undefined) foffset = newOffset;
+      const fq = document.getElementById('fq').value;
+      const frule = document.getElementById('frule').value;
+      const fsev = document.getElementById('fsev').value;
+      const fchan = document.getElementById('fchan').value;
+      const feid = document.getElementById('feid').value;
+      const params = { limit: flimit, offset: foffset };
+      if (fq) params.q=fq; if (frule) params.rule_id=frule; if (fsev) params.severity=fsev; if (fchan) params.channel=fchan; if (feid) params.event_id=feid;
+      const res = await fetch('/api/findings?' + qs(params)); const data = await res.json();
+      document.getElementById('ftotal').innerText = 'Total: ' + data.total;
+      document.getElementById('fpageinfo').innerText = `offset ${foffset} • showing ${data.items.length}`;
+      const rows = document.getElementById('frows'); rows.innerHTML='';
+      for (const it of data.items) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${it.event_timestamp||''}</td><td>${it.channel||''}</td><td>${it.event_id||''}</td><td>${it.rule_id||''}</td><td>${it.severity||''}</td><td>${it.description||''}</td><td>${it.tags||''}</td>`;
+        rows.appendChild(tr);
+      }
     }
+    function nextFindings(){ foffset+=flimit; loadFindings(foffset); }
+    function prevFindings(){ foffset=Math.max(0, foffset-flimit); loadFindings(foffset); }
 
-    function applyThemeFromStorage() {
-      const mode = localStorage.getItem('theme') || 'light';
-      if (mode === 'dark') document.body.classList.add('dark');
-      document.getElementById('themeBtn').innerText = mode === 'dark' ? 'Light mode' : 'Dark mode';
-    }
-
-    function refreshSaved() {
-      const sel = document.getElementById('savedSelect');
-      sel.innerHTML = '';
-      const saved = JSON.parse(localStorage.getItem('savedQueries') || '{}');
-      Object.keys(saved).forEach(name => {
-        const opt = document.createElement('option');
-        opt.value = name; opt.text = name; sel.appendChild(opt);
-      });
-    }
-
-    function saveQuery() {
-      const name = prompt('Nome query da salvare:');
-      if (!name) return;
-      const saved = JSON.parse(localStorage.getItem('savedQueries') || '{}');
-      saved[name] = paramsObj();
-      localStorage.setItem('savedQueries', JSON.stringify(saved));
-      refreshSaved();
-    }
-
-    function loadQuery() {
-      const sel = document.getElementById('savedSelect');
-      const name = sel.value; if (!name) return;
-      const saved = JSON.parse(localStorage.getItem('savedQueries') || '{}');
-      const q = saved[name]; if (!q) return;
-      document.getElementById('q').value = q.q || '';
-      document.getElementById('channel').value = q.channel || '';
-      document.getElementById('event').value = q.event_id || '';
-      document.getElementById('user_sid').value = q.user_sid || '';
-      document.getElementById('provider').value = q.provider || '';
-      document.getElementById('since').value = q.since || '';
-      document.getElementById('until').value = q.until || '';
-      sortBy = q.sort_by || 'timestamp';
-      sortDir = q.sort_dir || 'desc';
-      load(0);
-    }
-
-    function deleteQuery() {
-      const sel = document.getElementById('savedSelect');
-      const name = sel.value; if (!name) return;
-      const saved = JSON.parse(localStorage.getItem('savedQueries') || '{}');
-      delete saved[name];
-      localStorage.setItem('savedQueries', JSON.stringify(saved));
-      refreshSaved();
-    }
-
-    applyThemeFromStorage();
-    refreshSaved();
+    // initial load
     load(0);
   </script>
 </body>

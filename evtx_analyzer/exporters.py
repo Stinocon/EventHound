@@ -93,3 +93,37 @@ class ParquetExporter:
         self._flush()
         if self.writer is not None:
             self.writer.close()
+
+
+class FindingsJsonlExporter:
+    def __init__(self, path: str) -> None:
+        self.f = open(path, 'wb')
+
+    def write(self, finding: Dict) -> None:
+        self.f.write(orjson.dumps(finding))
+        self.f.write(b"\n")
+
+    def close(self) -> None:
+        self.f.close()
+
+
+class FindingsCsvExporter:
+    def __init__(self, path: str) -> None:
+        self.f = open(path, 'w', newline='', encoding='utf-8')
+        self.writer = csv.DictWriter(self.f, fieldnames=['event_timestamp', 'channel', 'event_id', 'rule_id', 'severity', 'description', 'tags'])
+        self.writer.writeheader()
+
+    def write(self, finding: Dict) -> None:
+        row = {
+            'event_timestamp': finding.get('event_timestamp'),
+            'channel': finding.get('channel'),
+            'event_id': finding.get('event_id'),
+            'rule_id': finding.get('rule_id'),
+            'severity': finding.get('severity'),
+            'description': finding.get('description'),
+            'tags': ','.join(finding.get('tags') or []),
+        }
+        self.writer.writerow(row)
+
+    def close(self) -> None:
+        self.f.close()

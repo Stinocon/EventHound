@@ -1,0 +1,7 @@
+usernames:
+  - "^svc_.*$"
+  - "^backup$"
+commandlines:
+  - "(?i)\\Windows\\System32\\TrustedInstaller.exe"
+rule_ids:
+  - "^failed_logon$"  # disable generic failed logon finding if too noisy

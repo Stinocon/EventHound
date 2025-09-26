@@ -13,6 +13,7 @@ from .storage import init_db as storage_init_db, insert_events, insert_findings
 from .maps import EventMapper
 from .rules import RuleSet
 from .safelists import Safelist
+from .sigma import SigmaLoader
 
 console = Console()
 
@@ -48,6 +49,7 @@ Env vars:
 @click.option('--maps-dir', default='', type=str, help='Load YAML maps from this directory')
 @click.option('--maps-sync', default='', type=str, help='Remote URL to sync/download maps (JSON or YAML)')
 @click.option('--rules-dir', default='', type=str, help='Load detection rules (YAML) from this directory')
+@click.option('--sigma-dir', default='', type=str, help='Load Sigma rules (YAML) from this directory')
 @click.option('--safelists-dir', default='', type=str, help='Load safelists (YAML/TXT) from this directory')
 @click.option('--findings-output', default='', type=str, help='Output prefix for findings (writes .findings.jsonl/.csv)')
 @click.option('--vss', is_flag=True, help='Also scan Volume Shadow Copies (Windows only)')
@@ -58,7 +60,7 @@ Env vars:
 @click.option('--help-all', is_flag=True, help='Show extended help with profiles, examples, env vars')
 def main(input_path: str, output_prefix: str, formats: str, profile: str, event_ids: str, only_event_id: str,
          channels: str, since: str, until: str, workers: int, dedup: bool, dsl: str, maps_dir: str, maps_sync: str,
-         rules_dir: str, safelists_dir: str, findings_output: str, vss: bool, vss_drives: str,
+         rules_dir: str, sigma_dir: str, safelists_dir: str, findings_output: str, vss: bool, vss_drives: str,
          serve: bool, host: str, port: int, help_all: bool) -> None:
     if help_all:
         console.print(EXTENDED_HELP)
@@ -76,7 +78,6 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
         from .exporters import ParquetExporter
         exporters.append(ParquetExporter(output_prefix + '.parquet'))
 
-    # Findings exporters (optional)
     findings_jsonl = None
     findings_csv = None
     if findings_output:
@@ -110,10 +111,11 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
     if maps_sync:
         mapper.sync_remote(maps_sync)
 
-    # Load rules and safelists
     rule_set = RuleSet()
     if rules_dir:
         rule_set.load_dir(rules_dir)
+    if sigma_dir:
+        SigmaLoader().load_dir(rule_set, sigma_dir)
     safelist = Safelist()
     if safelists_dir:
         safelist.load_dir(safelists_dir)
@@ -140,7 +142,6 @@ def main(input_path: str, output_prefix: str, formats: str, profile: str, event_
         for path in evtx_paths:
             for evt in parse_evtx_file(path, event_filter, mapper=mapper, dedup=dedup):
                 total_matched += 1
-                # Evaluate rules if any
                 if rule_set.rules and not safelist.is_event_safelisted(evt):
                     hits = rule_set.evaluate(evt)
                     for h in hits:

@@ -37,7 +37,6 @@ def iter_vss_evtx_paths(drives: List[str]) -> Iterable[str]:
 
 
 def parse_iso8601_utc(s: str) -> datetime:
-    # Accepts 'YYYY-MM-DDTHH:MM:SSZ' or with offset, normalizes to UTC
     dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
     return dt.astimezone(timezone.utc)
 
@@ -50,6 +49,30 @@ def _get(d: Dict, path: str, default=None):
         else:
             return default
     return cur
+
+
+def _eventdata_to_dict(event_node: Dict) -> Dict:
+    # Handles common structures:
+    # Event.EventData.Data -> list of {'@Name': 'Field', '#text': 'Value'}
+    # Or a dict when only one Data is present
+    data_node = event_node.get('EventData') if isinstance(event_node, dict) else None
+    if not isinstance(data_node, dict):
+        return {}
+    items = data_node.get('Data')
+    result: Dict[str, str] = {}
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, dict):
+                name = it.get('@Name') or it.get('Name')
+                value = it.get('#text') or it.get('text') or it.get('value')
+                if name is not None:
+                    result[str(name)] = '' if value is None else str(value)
+    elif isinstance(items, dict):
+        name = items.get('@Name') or items.get('Name')
+        value = items.get('#text') or items.get('text') or items.get('value')
+        if name is not None:
+            result[str(name)] = '' if value is None else str(value)
+    return result
 
 
 def normalize_event(obj: Dict, record) -> Dict:
@@ -73,7 +96,7 @@ def normalize_event(obj: Dict, record) -> Dict:
         except Exception:
             timestamp = sys_ts
 
-    eventdata = _get(obj, 'Event.EventData') or {}
+    eventdata = _eventdata_to_dict(_get(obj, 'Event') or {}) or (_get(obj, 'Event.EventData') or {})
 
     return {
         'timestamp': timestamp,

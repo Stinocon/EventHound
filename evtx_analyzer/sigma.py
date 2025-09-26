@@ -29,7 +29,6 @@ class SigmaLoader:
         return count
 
     def _convert_sigma_rule(self, obj: Dict[str, Any]) -> Optional[Rule]:
-        # Minimal subset: map detections with a single condition like "selection" or "selection1 and selection2"/"or".
         title = str(obj.get('title') or obj.get('id') or '')
         if not title:
             return None
@@ -40,40 +39,50 @@ class SigmaLoader:
         condition = str(detection.get('condition') or '').strip()
         if not condition:
             return None
-        # Build selections map: name -> list of conditions
         selections: Dict[str, List[RuleCondition]] = {}
         for sel_name, sel_body in detection.items():
             if sel_name == 'condition':
                 continue
             conds: List[RuleCondition] = []
             if isinstance(sel_body, dict):
-                # field -> value or list
                 for field, value in sel_body.items():
+                    op = 'eq'
+                    fld = str(field)
+                    # map simple field modifiers
+                    if '|contains' in fld:
+                        fld = fld.split('|contains', 1)[0]
+                        if isinstance(value, list):
+                            for v in value:
+                                conds.append(RuleCondition(fld, 'contains', v))
+                            continue
+                        else:
+                            conds.append(RuleCondition(fld, 'contains', value))
+                            continue
+                    if '|re' in fld or '|regex' in fld:
+                        fld = fld.split('|', 1)[0]
+                        if isinstance(value, list):
+                            for v in value:
+                                conds.append(RuleCondition(fld, 'regex', v))
+                            continue
+                        else:
+                            conds.append(RuleCondition(fld, 'regex', value))
+                            continue
+                    # default eq semantics
                     if isinstance(value, list):
-                        # OR across the list
-                        # represent as contains of any or eq any; default eq string
-                        # we'll attach these later under any_of
-                        # store as a special marker by expanding into multiple conditions
                         for v in value:
-                            conds.append(RuleCondition(str(field), 'eq', v))
+                            conds.append(RuleCondition(fld, 'eq', v))
                     else:
-                        conds.append(RuleCondition(str(field), 'eq', value))
+                        conds.append(RuleCondition(fld, 'eq', value))
             selections[sel_name] = conds
-        # Parse very simple conditions: tokens split by and/or
         tokens = condition.replace('(', ' ').replace(')', ' ').split()
-        # We'll support patterns like: selection, sel1 and sel2, sel1 or sel2
         if len(tokens) == 1:
             name = tokens[0]
             any_of: List[RuleCondition] = []
             all_of: List[RuleCondition] = []
-            # For a single selection: fields are AND, lists generated above are OR
-            # To approximate, put all field singletons into all_of, and duplicates for list items into any_of
-            # Here we just put all into any_of to avoid over-constraining
             for c in selections.get(name, []):
                 any_of.append(c)
             return Rule(rule_id=rule_id, description=description, severity=level, any_of=any_of, all_of=all_of, tags=['sigma'])
         else:
-            # Build combined using AND/OR between selections
             any_of: List[RuleCondition] = []
             all_of: List[RuleCondition] = []
             current_op = 'AND'

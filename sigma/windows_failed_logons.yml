@@ -1,0 +1,13 @@
+title: Windows Failed Logon
+id: 1f2e3d4c-failed-logon
+status: stable
+level: low
+author: sample
+logsource:
+  product: windows
+  service: security
+
+detection:
+  selection:
+    EventID: 4625
+  condition: selection

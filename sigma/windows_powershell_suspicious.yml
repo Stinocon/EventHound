@@ -1,0 +1,16 @@
+title: Suspicious PowerShell Usage
+id: 6a2a9b7c-ps-suspicious
+status: experimental
+level: high
+author: sample
+logsource:
+  product: windows
+  service: powershell
+
+detection:
+  selection:
+    ScriptBlockText|contains:
+      - DownloadString
+      - Invoke-Expression
+      - FromBase64String
+  condition: selection
